@@ -287,7 +287,7 @@ impl ShardReplicaSet {
         }
 
         for remote in updatable_remote_shards {
-            let operation = operation.clone();
+            let operation = operation.clone().from_peer(this_peer_id);
 
             let remote_update = async move {
                 remote

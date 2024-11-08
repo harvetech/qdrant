@@ -27,6 +27,7 @@ use strum::{EnumDiscriminants, EnumIter};
 
 use crate::hash_ring::{HashRingRouter, ShardIds};
 use crate::shards::shard::{PeerId, ShardId};
+use crate::shards::transfer::ShardTransferMethod;
 
 pub type ClockToken = u64;
 
@@ -47,13 +48,14 @@ pub enum FieldIndexOperations {
     DeleteIndex(JsonPath),
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OperationWithClockTag {
     #[serde(flatten)]
     pub operation: CollectionUpdateOperations,
-
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clock_tag: Option<ClockTag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_metadata: Option<DebugMetadata>,
 }
 
 impl OperationWithClockTag {
@@ -64,7 +66,54 @@ impl OperationWithClockTag {
         Self {
             operation: operation.into(),
             clock_tag,
+            debug_metadata: Some(DebugMetadata::new()),
         }
+    }
+
+    pub fn from_peer(mut self, from: PeerId) -> Self {
+        if let Some(metadata) = &mut self.debug_metadata {
+            metadata.received_from = ReceivedFrom::Peer(from);
+        }
+
+        self
+    }
+
+    pub fn from_forward_proxy(mut self, from: PeerId) -> Self {
+        if let Some(metadata) = &mut self.debug_metadata {
+            metadata.received_from = ReceivedFrom::ForwardProxy(from);
+        }
+
+        self
+    }
+
+    pub fn from_queue_proxy(mut self, from: PeerId) -> Self {
+        if let Some(metadata) = &mut self.debug_metadata {
+            metadata.received_from = ReceivedFrom::QueueProxy(from);
+        }
+
+        self
+    }
+
+    pub fn from_transfer(mut self, from: PeerId, method: ShardTransferMethod) -> Self {
+        if let Some(metadata) = &mut self.debug_metadata {
+            metadata.received_from = ReceivedFrom::Transfer { from, method };
+        }
+
+        self
+    }
+
+    pub fn received(mut self) -> Self {
+        if let Some(metadata) = &mut self.debug_metadata {
+            metadata.received_at = chrono::Utc::now();
+        }
+
+        self
+    }
+}
+
+impl PartialEq for OperationWithClockTag {
+    fn eq(&self, other: &Self) -> bool {
+        self.operation.eq(&other.operation) && self.clock_tag.eq(&other.clock_tag)
     }
 }
 
@@ -133,6 +182,48 @@ impl From<ClockTag> for api::grpc::qdrant::ClockTag {
             force: tag.force,
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+pub struct DebugMetadata {
+    /// Unique ID of the operation
+    uuid: uuid::Uuid,
+    /// Timestamp, when operation was first received from the client
+    issued_at: chrono::DateTime<chrono::Utc>,
+    /// Description, who sent operation to current peer
+    received_from: ReceivedFrom,
+    /// Timestamp, when operation was received by current peer
+    received_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl DebugMetadata {
+    pub fn new() -> Self {
+        let now = chrono::Utc::now();
+
+        Self {
+            uuid: uuid::Uuid::new_v4(),
+            issued_at: now,
+            received_from: ReceivedFrom::Client,
+            received_at: now,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+pub enum ReceivedFrom {
+    /// Operation received directly from client
+    Client,
+    /// Operation propagated from another peer
+    Peer(PeerId),
+    /// Operation received from forward proxy on another peer
+    ForwardProxy(PeerId),
+    /// Operation received from queue proxy on another peer (currently unused)
+    QueueProxy(PeerId),
+    /// Operation received as part of incoming shard transfer
+    Transfer {
+        from: PeerId,
+        method: ShardTransferMethod,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, EnumDiscriminants)]
