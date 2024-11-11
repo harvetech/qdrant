@@ -91,14 +91,6 @@ impl OperationWithClockTag {
         self
     }
 
-    pub fn received(mut self) -> Self {
-        if let Some(meta) = self.debug_metadata_mut() {
-            meta.received_at = chrono::Utc::now();
-        }
-
-        self
-    }
-
     #[allow(unused_mut, unused_variables)]
     pub fn with_debug_metadata(mut self, debug_metadata: Option<DebugMetadata>) -> Self {
         #[cfg(feature = "update-operations-debug-metadata")]
