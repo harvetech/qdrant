@@ -76,20 +76,25 @@ impl OperationWithClockTag {
     }
 
     pub fn reason(mut self, reason: Reason) -> Self {
-        self.debug_metadata_mut().map(|meta| meta.reason = reason);
+        if let Some(meta) = self.debug_metadata_mut() {
+            meta.reason = reason;
+        }
+
         self
     }
 
     pub fn sender(mut self, sender: PeerId) -> Self {
-        self.debug_metadata_mut()
-            .map(|meta| meta.sender = Some(sender));
+        if let Some(meta) = self.debug_metadata_mut() {
+            meta.sender = Some(sender);
+        }
 
         self
     }
 
     pub fn received(mut self) -> Self {
-        self.debug_metadata_mut()
-            .map(|meta| meta.received_at = chrono::Utc::now());
+        if let Some(meta) = self.debug_metadata_mut() {
+            meta.received_at = chrono::Utc::now();
+        }
 
         self
     }
@@ -114,6 +119,7 @@ impl OperationWithClockTag {
         None
     }
 
+    #[allow(clippy::unused_self)]
     fn debug_metadata_mut(&mut self) -> Option<&mut DebugMetadata> {
         #[cfg(feature = "update-operations-debug-metadata")]
         {

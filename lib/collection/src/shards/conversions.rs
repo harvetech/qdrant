@@ -168,6 +168,7 @@ pub fn internal_update_vectors(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn internal_delete_vectors(
     shard_id: Option<ShardId>,
     clock_tag: Option<ClockTag>,
@@ -199,6 +200,7 @@ pub fn internal_delete_vectors(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn internal_delete_vectors_by_filter(
     shard_id: Option<ShardId>,
     clock_tag: Option<ClockTag>,
