@@ -29,13 +29,12 @@ use crate::operations::types::{
 use crate::operations::universal_query::shard_query::{ShardQueryRequest, ShardQueryResponse};
 use crate::operations::{
     CollectionUpdateOperations, CreateIndex, FieldIndexOperations, OperationToShard,
-    OperationWithClockTag, SplitByShard as _,
+    OperationWithClockTag, Reason, SplitByShard as _,
 };
 use crate::shards::local_shard::LocalShard;
 use crate::shards::remote_shard::RemoteShard;
 use crate::shards::shard_trait::ShardOperation;
 use crate::shards::telemetry::LocalShardTelemetry;
-use crate::shards::transfer::ShardTransferMethod;
 
 /// ForwardProxyShard
 ///
@@ -180,17 +179,18 @@ impl ForwardProxyShard {
         // We only need to wait for the last batch.
         let wait = next_page_offset.is_none();
 
-        let transfer_method = if !merge_points {
-            ShardTransferMethod::StreamRecords
+        let reason = if !merge_points {
+            Reason::StreamRecordsTransfer
         } else {
-            ShardTransferMethod::ReshardingStreamRecords
+            Reason::Resharding
         };
 
         // TODO: Is cancelling `RemoteShard::update` safe for *receiver*?
         self.remote_shard
             .update(
                 OperationWithClockTag::from(insert_points_operation)
-                    .from_transfer(this_peer_id, transfer_method),
+                    .reason(reason)
+                    .sender(this_peer_id),
                 wait,
             ) // TODO: Assign clock tag!? 🤔
             .await?;
@@ -311,7 +311,7 @@ impl ShardOperation for ForwardProxyShard {
         if let Some(operation) = forward_operation {
             let remote_result = self
                 .remote_shard
-                .update(operation.from_forward_proxy(0), false) // TODO: Assign current peer to operation debug metadata!
+                .update(operation.reason(Reason::ForwardProxy), false) // TODO: Assign current peer to operation debug metadata!
                 .await
                 .map_err(|err| {
                     CollectionError::forward_proxy_error(self.remote_shard.peer_id, err)

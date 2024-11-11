@@ -20,7 +20,6 @@ use tokio::sync::Mutex;
 use super::remote_shard::RemoteShard;
 use super::transfer::driver::MAX_RETRY_COUNT;
 use super::transfer::transfer_tasks_pool::TransferTaskProgress;
-use super::transfer::ShardTransferMethod;
 use super::update_tracker::UpdateTracker;
 use crate::operations::point_ops::WriteOrdering;
 use crate::operations::types::{
@@ -667,9 +666,10 @@ async fn transfer_operations_batch(
 ) -> CollectionResult<()> {
     // TODO: naive transfer approach, transfer batch of points instead
     for (_idx, operation) in batch {
+        // TODO: Assign current peer to operation debug metadata!
         let mut operation = operation
             .clone()
-            .from_transfer(0, ShardTransferMethod::WalDelta); // TODO: Assign current peer to operation debug metadata!
+            .reason(crate::operations::Reason::WalDeltaTransfer);
 
         // Set force flag because operations from WAL may be unordered if another node is sending
         // new operations at the same time
