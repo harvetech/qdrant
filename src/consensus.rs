@@ -488,41 +488,36 @@ impl Consensus {
 
         // If this is the origin peer of the cluster, try to add origin peer to consensus
         if let Err(err) = self.try_add_origin() {
-            log::error!("Failed to add origin peer: {err}");
+            log::error!("Failed to add origin peer to consensus: {err}");
         }
 
         let tick_period = Duration::from_millis(self.config.tick_period_ms);
         let mut previous_tick = Instant::now();
 
         loop {
-            let from_peer_updates =
-                self.advance_node(previous_tick + tick_period, tick_period / 10)?;
+            let sync_local_state = self.advance_node(previous_tick, tick_period)?;
 
-            // TODO: Explain what's going on here... 🙄
             let elapsed_ticks = previous_tick.elapsed().div_duration_f64(tick_period).ceil() as u32;
 
-            let report_ticks = if from_peer_updates {
-                cmp::min(elapsed_ticks, 19)
-            } else {
-                elapsed_ticks
-            };
+            const DEFAULT_RAFT_ELECTION_TIMEOUT_TICKS: u32 = 2 * 10;
+            let report_ticks = cmp::min(elapsed_ticks, DEFAULT_RAFT_ELECTION_TIMEOUT_TICKS - 1);
+
+            previous_tick += tick_period * elapsed_ticks;
 
             for _ in 0..report_ticks {
                 self.node.tick();
             }
 
-            previous_tick += tick_period * elapsed_ticks;
+            let stop_consensus = self.on_ready()?;
 
-            if self.node.has_ready() {
-                // Persist AND apply changes, which were committed in the Raft State Machine
-                let stop_consensus = self.on_ready()?;
+            if stop_consensus {
+                return Ok(());
+            }
 
-                if stop_consensus {
-                    return Ok(());
-                }
-            } else {
-                // Assume consensus is up-to-date, we can sync local state
-                // Which involves resoling inconsistencies and trying to recover data marked as dead
+            // We consider that node is up-to-date with consensus, if we only received Raft heartbeats
+            // during `advance_node` call, and so we can try to recover dead shards and resolve local
+            // inconsistencies
+            if sync_local_state {
                 self.try_sync_local_state()?;
             }
         }
@@ -530,8 +525,8 @@ impl Consensus {
 
     fn advance_node(
         &mut self,
-        next_tick: Instant,
-        consecutive_message_timeout: Duration,
+        previous_tick: Instant,
+        tick_period: Duration,
     ) -> anyhow::Result<bool> {
         if self
             .try_promote_learner()
@@ -540,10 +535,10 @@ impl Consensus {
             return Ok(false);
         }
 
-        let mut updates = 0;
-        let mut from_peer_updates = false;
-
-        let mut timeout_at = next_tick;
+        // This loop propagates incoming events (user requests or messages from other Raft peers)
+        // from internal queue to the raft crate.
+        //
+        // After events propagated to the raft crate, we need to handle `on_ready`
 
         // This loop "batches" incoming messages, so we could "apply" them all at once. The "apply"
         // step is expensive, so this is done for performance reasons.
@@ -557,21 +552,19 @@ impl Consensus {
         // We need to limit the batch size, as application of one batch should be limited in time.
         const RAFT_BATCH_SIZE: usize = 128;
 
+        let next_tick = previous_tick + tick_period;
+        let consecutive_message_timeout = tick_period / 10;
+
+        let mut timeout_at = next_tick;
+        let mut events = 0;
+
+        let mut sync_local_state = true;
+
         loop {
-            // This queue have 2 types of events:
-            // - Messages from the leader, like pings, requests to add logs, acks, etc.
-            // - Messages from users, like requests to start shard transfers, etc.
-            //
-            // Timeout defines how long can we wait for the next message.
-            // Since this thread is sync, we can't wait indefinitely.
-            // Timeout is set up to be about the time of tick.
             let Ok(message) = self.recv_update(timeout_at) else {
                 break;
             };
 
-            // Those messages should not be batched, so we interrupt the loop if we see them.
-            // Motivation is: if we change the peer, it should be done immediately, otherwise we
-            // loose the update on this new peer
             let is_conf_change = matches!(
                 message,
                 Message::FromClient(
@@ -579,20 +572,25 @@ impl Consensus {
                 ),
             );
 
-            let is_from_peer = matches!(message, Message::FromPeer(_));
+            let is_heartbeat = match &message {
+                Message::FromClient(_) => false,
+                Message::FromPeer(message) => {
+                    matches!(
+                        message.get_msg_type(),
+                        MessageType::MsgHeartbeat | MessageType::MsgHeartbeatResponse,
+                    )
+                }
+            };
 
-            // We put the message in Raft State Machine
-            // This update will hold update in memory, but will not be persisted yet.
-            // E.g. if it is a ping, we don't need to persist anything ofr it.
             if let Err(err) = self.advance_node_impl(message) {
                 log::warn!("{err}");
                 continue;
             }
 
-            updates += 1;
-            from_peer_updates |= is_from_peer;
+            events += 1;
+            sync_local_state &= is_heartbeat;
 
-            if updates >= RAFT_BATCH_SIZE || is_conf_change {
+            if events >= RAFT_BATCH_SIZE || is_conf_change {
                 break;
             }
 
@@ -603,7 +601,7 @@ impl Consensus {
             }
         }
 
-        Ok(from_peer_updates)
+        Ok(sync_local_state)
     }
 
     fn recv_update(&mut self, timeout_at: Instant) -> Result<Message, TryRecvUpdateError> {
