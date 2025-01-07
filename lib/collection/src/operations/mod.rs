@@ -111,7 +111,7 @@ impl OperationWithClockTag {
         None
     }
 
-    #[allow(clippy::unused_self)]
+    #[allow(clippy::unused_self, clippy::needless_pass_by_ref_mut)]
     fn debug_metadata_mut(&mut self) -> Option<&mut DebugMetadata> {
         #[cfg(feature = "update-operations-debug-metadata")]
         {
