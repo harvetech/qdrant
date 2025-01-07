@@ -493,72 +493,62 @@ impl Consensus {
 
         let tick_period = Duration::from_millis(self.config.tick_period_ms);
         let mut previous_tick = Instant::now();
+        let mut idle_cycles = 0_usize;
 
         loop {
-            let sync_local_state = self.advance_node(previous_tick, tick_period)?;
+            let raft_messages = self.advance_node(tick_period)?;
 
-            let elapsed_ticks = previous_tick.elapsed().div_duration_f64(tick_period).ceil() as u32;
-
-            const DEFAULT_RAFT_ELECTION_TIMEOUT_TICKS: u32 = 2 * 10;
-            let report_ticks = cmp::min(elapsed_ticks, DEFAULT_RAFT_ELECTION_TIMEOUT_TICKS - 1);
+            let elapsed_ticks = previous_tick.elapsed().div_duration_f32(tick_period).ceil() as u32;
 
             previous_tick += tick_period * elapsed_ticks;
+
+            let report_ticks = if raft_messages > 0 {
+                cmp::min(elapsed_ticks, 15)
+            } else {
+                elapsed_ticks
+            };
 
             for _ in 0..report_ticks {
                 self.node.tick();
             }
 
-            let stop_consensus = self.on_ready()?;
+            let (stop_consensus, is_idle) = self.on_ready()?;
 
             if stop_consensus {
                 return Ok(());
             }
 
-            // We consider that node is up-to-date with consensus, if we only received Raft heartbeats
-            // during `advance_node` call, and so we can try to recover dead shards and resolve local
-            // inconsistencies
-            if sync_local_state {
+            if is_idle {
+                if raft_messages > 0 {
+                    idle_cycles += 1;
+                }
+            } else {
+                idle_cycles = 0;
+            }
+
+            if idle_cycles >= 3 {
                 self.try_sync_local_state()?;
             }
         }
     }
 
-    fn advance_node(
-        &mut self,
-        previous_tick: Instant,
-        tick_period: Duration,
-    ) -> anyhow::Result<bool> {
+    fn advance_node(&mut self, tick_period: Duration) -> anyhow::Result<usize> {
         if self
             .try_promote_learner()
             .context("failed to promote learner")?
         {
-            return Ok(false);
+            return Ok(0);
         }
 
-        // This loop propagates incoming events (user requests or messages from other Raft peers)
-        // from internal queue to the raft crate.
-        //
-        // After events propagated to the raft crate, we need to handle `on_ready`
-
-        // This loop "batches" incoming messages, so we could "apply" them all at once. The "apply"
-        // step is expensive, so this is done for performance reasons.
-        //
-        // On the other hand, we still want to react to individual messages as fast as possible.
-        //
-        // To fulfill both requirements, we:
-        //   1. Wait for the *first* message for full tick period.
-        //   2. If the message is received, wait for the *next* message for 1/10 of the tick period only.
-
-        // We need to limit the batch size, as application of one batch should be limited in time.
         const RAFT_BATCH_SIZE: usize = 128;
 
-        let next_tick = previous_tick + tick_period;
+        let hard_timeout_at = Instant::now() + tick_period;
         let consecutive_message_timeout = tick_period / 10;
 
-        let mut timeout_at = next_tick;
         let mut events = 0;
+        let mut raft_messages = 0;
 
-        let mut sync_local_state = true;
+        let mut timeout_at = hard_timeout_at;
 
         loop {
             let Ok(message) = self.recv_update(timeout_at) else {
@@ -572,15 +562,7 @@ impl Consensus {
                 ),
             );
 
-            let is_heartbeat = match &message {
-                Message::FromClient(_) => false,
-                Message::FromPeer(message) => {
-                    matches!(
-                        message.get_msg_type(),
-                        MessageType::MsgHeartbeat | MessageType::MsgHeartbeatResponse,
-                    )
-                }
-            };
+            let is_raft_message = matches!(message, Message::FromPeer(_));
 
             if let Err(err) = self.advance_node_impl(message) {
                 log::warn!("{err}");
@@ -588,7 +570,7 @@ impl Consensus {
             }
 
             events += 1;
-            sync_local_state &= is_heartbeat;
+            raft_messages += usize::from(is_raft_message);
 
             if events >= RAFT_BATCH_SIZE || is_conf_change {
                 break;
@@ -596,12 +578,12 @@ impl Consensus {
 
             let now = Instant::now();
 
-            if now <= next_tick {
+            if now < hard_timeout_at {
                 timeout_at = now + consecutive_message_timeout;
             }
         }
 
-        Ok(sync_local_state)
+        Ok(raft_messages)
     }
 
     fn recv_update(&mut self, timeout_at: Instant) -> Result<Message, TryRecvUpdateError> {
@@ -814,21 +796,23 @@ impl Consensus {
     }
 
     /// Returns `true` if consensus should be stopped, `false` otherwise.
-    fn on_ready(&mut self) -> anyhow::Result<bool> {
+    fn on_ready(&mut self) -> anyhow::Result<(bool, bool)> {
         if !self.node.has_ready() {
             // No updates to process
-            return Ok(false);
+            return Ok((false, true));
         }
+
         self.store().record_consensus_working();
+
         // Get the `Ready` with `RawNode::ready` interface.
         let ready = self.node.ready();
 
-        let (Some(light_ready), role_change) = self.process_ready(ready)? else {
+        let (Some(light_ready), role_change, is_idle_ready) = self.process_ready(ready)? else {
             // No light ready, so we need to stop consensus.
-            return Ok(true);
+            return Ok((true, false));
         };
 
-        let result = self.process_light_ready(light_ready)?;
+        let (stop_consensus, is_idle_light_ready) = self.process_light_ready(light_ready)?;
 
         if let Some(role_change) = role_change {
             self.process_role_change(role_change);
@@ -836,7 +820,7 @@ impl Consensus {
 
         self.store().compact_wal(self.config.compact_wal_entries)?;
 
-        Ok(result)
+        Ok((stop_consensus, is_idle_ready && is_idle_light_ready))
     }
 
     fn process_role_change(&self, role_change: StateRole) {
@@ -864,58 +848,78 @@ impl Consensus {
     fn process_ready(
         &mut self,
         mut ready: raft::Ready,
-    ) -> anyhow::Result<(Option<raft::LightReady>, Option<StateRole>)> {
+    ) -> anyhow::Result<(Option<raft::LightReady>, Option<StateRole>, bool)> {
         let store = self.store();
+
+        let mut is_idle = true;
 
         if !ready.messages().is_empty() {
             log::trace!("Handling {} messages", ready.messages().len());
             self.send_messages(ready.take_messages());
         }
+
         if !ready.snapshot().is_empty() {
             // This is a snapshot, we need to apply the snapshot at first.
             log::debug!("Applying snapshot");
+            is_idle = false;
 
             if let Err(err) = store.apply_snapshot(&ready.snapshot().clone())? {
                 log::error!("Failed to apply snapshot: {err}");
             }
         }
+
         if !ready.entries().is_empty() {
             // Append entries to the Raft log.
             log::debug!("Appending {} entries to raft log", ready.entries().len());
+            is_idle = false;
+
             store
                 .append_entries(ready.take_entries())
                 .map_err(|err| anyhow!("Failed to append entries: {}", err))?
         }
+
         if let Some(hs) = ready.hs() {
             // Raft HardState changed, and we need to persist it.
             log::debug!("Changing hard state. New hard state: {hs:?}");
+            is_idle = false;
+
             store
                 .set_hard_state(hs.clone())
                 .map_err(|err| anyhow!("Failed to set hard state: {}", err))?
         }
+
         let role_change = ready.ss().map(|ss| ss.raft_state);
+
         if let Some(ss) = ready.ss() {
             log::debug!("Changing soft state. New soft state: {ss:?}");
+            is_idle = false;
+
             self.handle_soft_state(ss);
         }
+
         if !ready.persisted_messages().is_empty() {
             log::trace!(
                 "Handling {} persisted messages",
                 ready.persisted_messages().len()
             );
+
             self.send_messages(ready.take_persisted_messages());
         }
+
+        let committed_entries = ready.take_committed_entries();
+        is_idle &= committed_entries.is_empty();
+
         // Should be done after Hard State is saved, so that `applied` index is never bigger than `commit`.
-        let stop_consensus =
-            handle_committed_entries(&ready.take_committed_entries(), &store, &mut self.node)
-                .context("Failed to handle committed entries")?;
+        let stop_consensus = handle_committed_entries(&committed_entries, &store, &mut self.node)
+            .context("Failed to handle committed entries")?;
+
         if stop_consensus {
-            return Ok((None, None));
+            return Ok((None, None, false));
         }
 
         // Advance the Raft.
         let light_rd = self.node.advance(ready);
-        Ok((Some(light_rd), role_change))
+        Ok((Some(light_rd), role_change, is_idle))
     }
 
     /// Tries to process raft's light ready state.
@@ -924,23 +928,36 @@ impl Consensus {
     ///
     /// Returns with err on failure to apply the state.
     /// If it receives message to stop the consensus - returns `true`, otherwise `false`.
-    fn process_light_ready(&mut self, mut light_rd: raft::LightReady) -> anyhow::Result<bool> {
+    fn process_light_ready(
+        &mut self,
+        mut light_rd: raft::LightReady,
+    ) -> anyhow::Result<(bool, bool)> {
         let store = self.store();
+
+        let mut is_idle = true;
+
         // Update commit index.
         if let Some(commit) = light_rd.commit_index() {
             log::debug!("Updating commit index to {commit}");
+            is_idle = false;
+
             store
                 .set_commit_index(commit)
                 .map_err(|err| anyhow!("Failed to set commit index: {}", err))?;
         }
+
         self.send_messages(light_rd.take_messages());
+
+        let committed_entries = light_rd.take_committed_entries();
+        is_idle &= committed_entries.is_empty();
+
         // Apply all committed entries.
-        let stop_consensus =
-            handle_committed_entries(&light_rd.take_committed_entries(), &store, &mut self.node)
-                .context("Failed to apply committed entries")?;
+        let stop_consensus = handle_committed_entries(&committed_entries, &store, &mut self.node)
+            .context("Failed to apply committed entries")?;
+
         // Advance the apply index.
         self.node.advance_apply();
-        Ok(stop_consensus)
+        Ok((stop_consensus, is_idle))
     }
 
     fn store(&self) -> ConsensusStateRef {
