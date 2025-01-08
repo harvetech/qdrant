@@ -588,6 +588,13 @@ impl Consensus {
                 break;
             };
 
+            let is_conf_change = matches!(
+                message,
+                Message::FromClient(
+                    ConsensusOperations::AddPeer { .. } | ConsensusOperations::RemovePeer(_)
+                ),
+            );
+
             let is_raft_message = matches!(message, Message::FromPeer(_));
 
             if let Err(err) = self.advance_node_impl(message) {
@@ -596,14 +603,14 @@ impl Consensus {
             }
 
             timeout_at = cmp::min(
-                Instant::now() + consecutive_message_timeout,
                 hard_timeout_at,
+                Instant::now() + consecutive_message_timeout,
             );
 
             events += 1;
             raft_messages += usize::from(is_raft_message);
 
-            if events >= RAFT_BATCH_SIZE {
+            if events >= RAFT_BATCH_SIZE || is_conf_change {
                 break;
             }
         }
