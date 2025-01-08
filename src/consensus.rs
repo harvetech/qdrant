@@ -528,17 +528,18 @@ impl Consensus {
                 self.node.tick();
             }
 
-            // Process Raft node `Ready` state
+            // Append new entries to the WAL, apply committed entries, etc...
             let (stop_consensus, is_idle) = self.on_ready()?;
 
             if stop_consensus {
                 return Ok(());
             }
 
-            // If we did not update Raft state during `on_ready`, we consider Raft node to be "idle"
+            // If we only sent outgoing Raft messages, but did not change any state during `on_ready`,
+            // we consider Raft node to be "idle"
             if is_idle {
                 // If we received new Raft messages (i.e., we are still connected to Raft leader)
-                // and Raft node is idle, track "idle cycle"
+                // and Raft node is idle, count "idle cycle"
                 if raft_messages > 0 {
                     idle_cycles += 1;
                 }
