@@ -496,36 +496,58 @@ impl Consensus {
         let mut idle_cycles = 0_usize;
 
         loop {
+            // Wait (for up to `tick_period`) for incoming client requests and Raft messages
             let raft_messages = self.advance_node(tick_period)?;
 
-            let elapsed_ticks = previous_tick.elapsed().div_duration_f32(tick_period).ceil() as u32;
+            // Calculate how many ticks passed since the last one
+            let elapsed_ticks = previous_tick.elapsed().div_duration_f32(tick_period) as u32;
 
+            // Update previous tick timestamp
             previous_tick += tick_period * elapsed_ticks;
 
+            // Calculate how many ticks we should *report* to Raft node
+            //
+            // If last iteration of the loop took too long to complete, and we report all elapsed
+            // ticks to Raft node, it might trigger unnecessary leader election.
+            //
+            // To prevent this, we check if we received new Raft messages (i.e., we are still
+            // connected to Raft leader), and cap how many ticks we report to Raft node.
+            //
+            // By default, election is triggered if no Raft messages were received for 20 ticks,
+            // so we report at most 15 ticks.
+            //
+            // (See https://docs.rs/raft/latest/raft/struct.Config.html#structfield.election_tick.)
             let report_ticks = if raft_messages > 0 {
                 cmp::min(elapsed_ticks, 15)
             } else {
                 elapsed_ticks
             };
 
+            // Report elapsed ticks to Raft node
             for _ in 0..report_ticks {
                 self.node.tick();
             }
 
+            // Process Raft node `Ready` state
             let (stop_consensus, is_idle) = self.on_ready()?;
 
             if stop_consensus {
                 return Ok(());
             }
 
+            // If we did not update Raft state during `on_ready`, we consider Raft node to be "idle"
             if is_idle {
+                // If we received new Raft messages (i.e., we are still connected to Raft leader)
+                // and Raft node is idle, track "idle cycle"
                 if raft_messages > 0 {
                     idle_cycles += 1;
                 }
             } else {
+                // If Raft state was updated, reset idle cycle counter
                 idle_cycles = 0;
             }
 
+            // If Raft node was idle for 3 cycles, try to sync local state to consensus
             if idle_cycles >= 3 {
                 self.try_sync_local_state()?;
             }
@@ -540,27 +562,30 @@ impl Consensus {
             return Ok(0);
         }
 
+        // This method propagates incoming client requests and Raft messages to Raft node
+
+        // It's more efficient to process multiple events, so we propagate up to 128 events at a time
         const RAFT_BATCH_SIZE: usize = 128;
 
+        // We have to tick Raft node periodically, so we can wait for new events for up to `tick_period`
         let hard_timeout_at = Instant::now() + tick_period;
+
+        // We also want to react to new events as quickly as possible, so we only wait for `tick_period / 10`
+        // for any consecutive events after the first one
         let consecutive_message_timeout = tick_period / 10;
 
-        let mut events = 0;
-        let mut raft_messages = 0;
-
+        // Timeout to wait for the *next* event
         let mut timeout_at = hard_timeout_at;
+
+        // Track how many *events* we received...
+        let mut events = 0;
+        // ...and how many of these events were *Raft messages*
+        let mut raft_messages = 0;
 
         loop {
             let Ok(message) = self.recv_update(timeout_at) else {
                 break;
             };
-
-            let is_conf_change = matches!(
-                message,
-                Message::FromClient(
-                    ConsensusOperations::AddPeer { .. } | ConsensusOperations::RemovePeer(_)
-                ),
-            );
 
             let is_raft_message = matches!(message, Message::FromPeer(_));
 
@@ -569,17 +594,16 @@ impl Consensus {
                 continue;
             }
 
+            timeout_at = cmp::min(
+                Instant::now() + consecutive_message_timeout,
+                hard_timeout_at,
+            );
+
             events += 1;
             raft_messages += usize::from(is_raft_message);
 
-            if events >= RAFT_BATCH_SIZE || is_conf_change {
+            if events >= RAFT_BATCH_SIZE {
                 break;
-            }
-
-            let now = Instant::now();
-
-            if now < hard_timeout_at {
-                timeout_at = now + consecutive_message_timeout;
             }
         }
 
@@ -851,6 +875,11 @@ impl Consensus {
     ) -> anyhow::Result<(Option<raft::LightReady>, Option<StateRole>, bool)> {
         let store = self.store();
 
+        // We consider Raft node to be idle if we don't change Raft state during `process_ready`.
+        //
+        // E.g.:
+        // - sending messages does not change Raft state, so it's considered idle
+        // - but anything else does, and so is not idle
         let mut is_idle = true;
 
         if !ready.messages().is_empty() {
@@ -934,6 +963,11 @@ impl Consensus {
     ) -> anyhow::Result<(bool, bool)> {
         let store = self.store();
 
+        // We consider Raft node to be idle, if we don't change Raft state during `process_light_ready`.
+        //
+        // E.g.:
+        // - sending messages does not change Raft state, so it's considered idle
+        // - but anything else does, and so is not idle
         let mut is_idle = true;
 
         // Update commit index.
