@@ -588,6 +588,12 @@ impl Consensus {
                 break;
             };
 
+            // When we discover conf-change request, we have to break early and process it ASAP,
+            // because Raft node allows to process single conf-change request at a time.
+            //
+            // E.g., without this condition, if two nodes try to join cluster at the same time and
+            // both conf-change requests are processed in the same batch, the second request would
+            // be ignored and the node would fail to join.
             let is_conf_change = matches!(
                 message,
                 Message::FromClient(
