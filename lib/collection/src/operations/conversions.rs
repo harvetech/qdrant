@@ -21,7 +21,7 @@ use segment::data_types::vectors::{
     BatchVectorStructInternal, NamedQuery, VectorInternal, VectorStructInternal,
 };
 use segment::types::{
-    Distance, HnswConfig, MultiVectorConfig, QuantizationConfig, StrictModeConfig,
+    Distance, HnswConfig, MultiVectorConfig, QuantizationConfig, StrictModeConfig, VectorNameBuf,
 };
 use segment::vector_storage::query::{ContextPair, ContextQuery, DiscoveryQuery, RecoQuery};
 use sparse::common::sparse_vector::{validate_sparse_vector_impl, SparseVector};
@@ -217,7 +217,7 @@ pub fn try_discover_request_from_grpc(
                 .map(|selector| selector.into())
                 .unwrap_or_default(),
         ),
-        using: using.map(|u| u.into()),
+        using: using.map(|u| VectorNameBuf(u).into()),
         lookup_from: lookup_from.map(|l| l.into()),
     };
 
@@ -386,7 +386,7 @@ impl From<CollectionInfo> for api::grpc::qdrant::CollectionInfo {
                                         map: vectors_params
                                             .iter()
                                             .map(|(vector_name, vector_param)| {
-                                                (vector_name.clone(), vector_param.clone().into())
+                                                (vector_name.0.clone(), vector_param.clone().into())
                                             })
                                             .collect(),
                                     },
@@ -406,7 +406,7 @@ impl From<CollectionInfo> for api::grpc::qdrant::CollectionInfo {
                             map: sparse_vectors
                                 .into_iter()
                                 .map(|(name, sparse_vector_params)| {
-                                    (name, sparse_vector_params.into())
+                                    (name.0, sparse_vector_params.into())
                                 })
                                 .collect(),
                         }
@@ -546,7 +546,7 @@ impl TryFrom<api::grpc::qdrant::vectors_config::Config> for VectorsConfig {
             api::grpc::qdrant::vectors_config::Config::ParamsMap(vectors_params) => {
                 let mut params_map = BTreeMap::new();
                 for (name, params) in vectors_params.map {
-                    params_map.insert(name, params.try_into()?);
+                    params_map.insert(VectorNameBuf(name), params.try_into()?);
                 }
                 VectorsConfig::Multi(params_map)
             }
@@ -568,7 +568,7 @@ impl TryFrom<api::grpc::qdrant::vectors_config_diff::Config> for VectorsConfigDi
             api::grpc::qdrant::vectors_config_diff::Config::ParamsMap(vectors_params) => {
                 let mut params_map = BTreeMap::new();
                 for (name, params) in vectors_params.map {
-                    params_map.insert(name, params.try_into()?);
+                    params_map.insert(VectorNameBuf(name), params.try_into()?);
                 }
                 VectorsConfigDiff(params_map)
             }
@@ -1042,7 +1042,7 @@ impl<'a> From<CollectionCoreSearchRequest<'a>> for api::grpc::qdrant::CoreSearch
             params: request.params.map(|sp| sp.into()),
             score_threshold: request.score_threshold,
             offset: Some(request.offset as u64),
-            vector_name: Some(request.query.get_vector_name().to_owned()),
+            vector_name: Some(request.query.get_vector_name().to_owned().0),
             read_consistency: None,
         }
     }
@@ -1133,7 +1133,7 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
                                     .map(TryInto::try_into)
                                     .collect::<Result<_, _>>()?,
                             ),
-                            using: value.vector_name,
+                            using: value.vector_name.map(VectorNameBuf),
                         })
                     }
                     api::grpc::qdrant::query_enum::Query::Discover(query) => {
@@ -1149,7 +1149,7 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
 
                         QueryEnum::Discover(NamedQuery {
                             query: DiscoveryQuery::new(target.try_into()?, pairs),
-                            using: value.vector_name,
+                            using: value.vector_name.map(VectorNameBuf),
                         })
                     }
                     api::grpc::qdrant::query_enum::Query::Context(query) => {
@@ -1161,7 +1161,7 @@ impl TryFrom<api::grpc::qdrant::CoreSearchPoints> for CoreSearchRequest {
 
                         QueryEnum::Context(NamedQuery {
                             query: ContextQuery::new(pairs),
-                            using: value.vector_name,
+                            using: value.vector_name.map(VectorNameBuf),
                         })
                     }
                 })
@@ -1355,7 +1355,7 @@ impl TryFrom<api::grpc::qdrant::RecommendPoints> for RecommendRequestInternal {
                     .unwrap_or_default(),
             ),
             score_threshold: value.score_threshold,
-            using: value.using.map(|name| name.into()),
+            using: value.using.map(|name| VectorNameBuf(name).into()),
             lookup_from: value.lookup_from.map(|x| x.into()),
         })
     }
@@ -1740,7 +1740,7 @@ impl TryFrom<api::grpc::qdrant::SparseVectorConfig> for SparseVectorsConfig {
     fn try_from(value: api::grpc::qdrant::SparseVectorConfig) -> Result<Self, Self::Error> {
         let api::grpc::qdrant::SparseVectorConfig { map } = value;
         map.into_iter()
-            .map(|(k, v)| Ok((k, v.try_into()?)))
+            .map(|(k, v)| Ok((VectorNameBuf(k), v.try_into()?)))
             .collect::<Result<_, Status>>()
             .map(SparseVectorsConfig)
     }
@@ -1775,7 +1775,7 @@ impl TryFrom<api::grpc::qdrant::CollectionConfig> for CollectionConfig {
                                 params_map
                                     .map
                                     .into_iter()
-                                    .map(|(k, v)| Ok((k, v.try_into()?)))
+                                    .map(|(k, v)| Ok((VectorNameBuf(k), v.try_into()?)))
                                     .collect::<Result<BTreeMap<_, _>, Status>>()?,
                             ),
                         },

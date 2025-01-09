@@ -10,7 +10,7 @@ use segment::index::hnsw_index::num_rayon_threads;
 use segment::segment::Segment;
 use segment::segment_constructor::segment_builder::SegmentBuilder;
 use segment::segment_constructor::simple_segment_constructor::build_multivec_segment;
-use segment::types::Distance;
+use segment::types::{Distance, VectorName};
 use segment::vector_storage::VectorStorage;
 use tempfile::Builder;
 
@@ -55,15 +55,15 @@ fn test_rebuild_with_removed_vectors() {
     for i in 0..NUM_VECTORS_2 {
         if i % 3 == 0 {
             segment2
-                .delete_vector(2, (NUM_VECTORS_1 + i).into(), "vector1")
+                .delete_vector(2, (NUM_VECTORS_1 + i).into(), VectorName::new("vector1"))
                 .unwrap();
             segment2
-                .delete_vector(2, (NUM_VECTORS_1 + i).into(), "vector2")
+                .delete_vector(2, (NUM_VECTORS_1 + i).into(), VectorName::new("vector2"))
                 .unwrap();
         }
         if i % 3 == 1 {
             segment2
-                .delete_vector(2, (NUM_VECTORS_1 + i).into(), "vector2")
+                .delete_vector(2, (NUM_VECTORS_1 + i).into(), VectorName::new("vector2"))
                 .unwrap();
         }
         if i % 2 == 0 {
@@ -103,14 +103,14 @@ fn test_rebuild_with_removed_vectors() {
 
     let vec1_count = merged_segment
         .vector_data
-        .get("vector1")
+        .get(VectorName::new("vector1"))
         .unwrap()
         .vector_storage
         .borrow()
         .available_vector_count();
     let vec2_count = merged_segment
         .vector_data
-        .get("vector2")
+        .get(VectorName::new("vector2"))
         .unwrap()
         .vector_storage
         .borrow()

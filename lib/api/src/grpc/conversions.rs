@@ -11,7 +11,9 @@ use segment::data_types::index::{
     KeywordIndexType, TextIndexType, UuidIndexType,
 };
 use segment::data_types::{facets as segment_facets, vectors as segment_vectors};
-use segment::types::{default_quantization_ignore_value, DateTimePayloadType, FloatPayloadType};
+use segment::types::{
+    default_quantization_ignore_value, DateTimePayloadType, FloatPayloadType, VectorNameBuf,
+};
 use segment::vector_storage::query as segment_query;
 use sparse::common::sparse_vector::validate_sparse_vector_impl;
 use tonic::Status;
@@ -757,7 +759,9 @@ impl From<segment::types::WithVector> for WithVectorsSelector {
                 with_vectors_selector::SelectorOptions::Enable(enabled)
             }
             segment::types::WithVector::Selector(include) => {
-                with_vectors_selector::SelectorOptions::Include(VectorsSelector { names: include })
+                with_vectors_selector::SelectorOptions::Include(VectorsSelector {
+                    names: include.into_iter().map(|name| name.0).collect(),
+                })
             }
         };
         Self {
@@ -772,7 +776,7 @@ impl From<WithVectorsSelector> for segment::types::WithVector {
             None => Self::default(),
             Some(with_vectors_selector::SelectorOptions::Enable(enabled)) => Self::Bool(enabled),
             Some(with_vectors_selector::SelectorOptions::Include(include)) => {
-                Self::Selector(include.names)
+                Self::Selector(include.names.into_iter().map(VectorNameBuf).collect())
             }
         }
     }
@@ -1082,7 +1086,7 @@ fn grpc_condition_into_condition(
         )),
         ConditionOneOf::HasVector(has_vector) => Some(segment::types::Condition::HasVector(
             segment::types::HasVectorCondition {
-                has_vector: has_vector.has_vector,
+                has_vector: VectorNameBuf(has_vector.has_vector),
             },
         )),
     };
@@ -1116,7 +1120,7 @@ impl From<segment::types::Condition> for Condition {
             segment::types::Condition::CustomIdChecker(_) => None,
             segment::types::Condition::HasVector(has_vector) => {
                 Some(ConditionOneOf::HasVector(HasVectorCondition {
-                    has_vector: has_vector.has_vector,
+                    has_vector: has_vector.has_vector.0,
                 }))
             }
         };
@@ -1801,6 +1805,7 @@ pub fn into_named_vector_struct(
     Ok(match indices {
         Some(indices) => NamedVectorStruct::Sparse(NamedSparseVector {
             name: vector_name
+                .map(VectorNameBuf)
                 .ok_or_else(|| Status::invalid_argument("Sparse vector must have a name"))?,
             vector: SparseVector::new(indices.data, vector).map_err(|e| {
                 Status::invalid_argument(format!(
@@ -1811,7 +1816,7 @@ pub fn into_named_vector_struct(
         None => {
             if let Some(vector_name) = vector_name {
                 NamedVectorStruct::Dense(NamedVector {
-                    name: vector_name,
+                    name: vector_name.into(),
                     vector,
                 })
             } else {
@@ -2121,7 +2126,7 @@ impl From<LookupLocation> for rest::LookupLocation {
     fn from(value: LookupLocation) -> Self {
         Self {
             collection: value.collection_name,
-            vector: value.vector_name,
+            vector: value.vector_name.map(VectorNameBuf),
             shard_key: value.shard_key_selector.map(rest::ShardKeySelector::from),
         }
     }

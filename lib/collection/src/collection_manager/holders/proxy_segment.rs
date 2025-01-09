@@ -1911,13 +1911,17 @@ mod tests {
         assert_eq!(segment_info.num_vectors, 4);
 
         // Delete vector 'a' of point 6, vector count should decrease by 1
-        proxy_segment.delete_vector(106, 6.into(), "a").unwrap();
+        proxy_segment
+            .delete_vector(106, 6.into(), "a".into())
+            .unwrap();
         let segment_info = proxy_segment.info();
         assert_eq!(segment_info.num_points, 3);
         assert_eq!(segment_info.num_vectors, 3);
 
         // Deleting it again shouldn't chain anything
-        proxy_segment.delete_vector(107, 6.into(), "a").unwrap();
+        proxy_segment
+            .delete_vector(107, 6.into(), "a".into())
+            .unwrap();
         let segment_info = proxy_segment.info();
         assert_eq!(segment_info.num_points, 3);
         assert_eq!(segment_info.num_vectors, 3);
