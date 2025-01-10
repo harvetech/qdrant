@@ -55,6 +55,7 @@ pub struct Consensus {
     /// ToDo: Make if many
     config: ConsensusConfig,
     broker: RaftMessageBroker,
+    raft_config: Config,
 }
 
 impl Consensus {
@@ -285,6 +286,7 @@ impl Consensus {
             runtime,
             config,
             broker,
+            raft_config,
         };
 
         if !state_ref.is_new_deployment() {
@@ -518,7 +520,9 @@ impl Consensus {
             //
             // (See https://docs.rs/raft/latest/raft/struct.Config.html#structfield.election_tick.)
             let report_ticks = if raft_messages > 0 {
-                cmp::min(elapsed_ticks, 15)
+                // Expected value here is 15 (20 - 5), but we cap it at 1 to prevent errors
+                let max_elapsed_ticks = self.raft_config.election_tick.saturating_sub(5).max(1);
+                cmp::min(elapsed_ticks, max_elapsed_ticks as u32)
             } else {
                 elapsed_ticks
             };
