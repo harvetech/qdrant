@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use parking_lot::Mutex;
 use tokio::task::block_in_place;
 
@@ -74,7 +75,8 @@ pub(super) async fn drive(
                     None,
                     false,
                     None,
-                    None, // no timeout
+                    None,                           // no timeout
+                    HwMeasurementAcc::disposable(), // Internal operation, no hardware measuring needed
                 )
                 .await?;
 

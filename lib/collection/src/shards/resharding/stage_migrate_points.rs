@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common::counter::hardware_accumulator::HwMeasurementAcc;
 use parking_lot::Mutex;
 use rand::seq::SliceRandom;
 use tokio::task::block_in_place;
@@ -326,6 +327,7 @@ async fn drive_down(
                     false,
                     None,
                     None,
+                    HwMeasurementAcc::disposable(), // Internal operation, no hardware measurement needed
                 )
                 .await?;
 
